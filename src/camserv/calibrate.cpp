@@ -18,6 +18,7 @@
 // This program is basically a copy of the OpenCV camera calibration tutorial
 // found here: https://github.com/Itseez/opencv/blob/master/samples/cpp/calibration.cpp
 // Except that it works with simple-tracker's Camera interface.
+// *******************************************
 
 
 #include <cctype>
@@ -43,7 +44,7 @@ using namespace std;
 
 const char * usage =
         " \nexample command line for calibration from a live feed.\n"
-        "   calibration  -w 4 -h 5 -s 0.025 -o camera.yml -op -oe\n"
+        "   calibration  -w 4 -h 5 -s 0.025 -o camera.yml -op -oe -t wcam\n"
         " \n"
         " example command line for calibration from a list of stored images:\n"
         "   imagelist_creator image_list.xml *.png\n"
@@ -100,7 +101,7 @@ static void help() {
             "                              #  - (-t list) text file with a list of the images of the board\n"
             "                              #    the text file can be generated with imagelist_creator\n"
             "                              #  - (-t file) name of video file with a video of the board\n"
-            "                              # if input_data not specified, a live view from the camera is used\n" 
+            "                              # if input_data not specified, a live view from the camera is used\n"
             "\n");
     printf("\n%s", usage);
     printf("\n%s", liveCaptureHelp);
@@ -121,8 +122,10 @@ enum CameraType {
 static double computeReprojectionErrors(
         const vector<vector<Point3f> >& objectPoints,
         const vector<vector<Point2f> >& imagePoints,
-        const vector<Mat>& rvecs, const vector<Mat>& tvecs,
-        const Mat& cameraMatrix, const Mat& distCoeffs,
+        const std::vector<cv::Matx31d>& rvecs, 
+        const std::vector<cv::Matx31d>& tvecs,
+        const cv::Matx33d& cameraMatrix, 
+        const cv::Vec4d& distCoeffs,
         vector<float>& perViewErrors) {
     vector<Point2f> imagePoints2;
     int i, totalPoints = 0;
@@ -169,23 +172,31 @@ static void calcChessboardCorners(Size boardSize, float squareSize, vector<Point
 static bool runCalibration(vector<vector<Point2f> > imagePoints,
         Size imageSize, Size boardSize, Pattern patternType,
         float squareSize, float aspectRatio,
-        int flags, Mat& cameraMatrix, Mat& distCoeffs,
-        vector<Mat>& rvecs, vector<Mat>& tvecs,
+        int flags,
+        cv::Matx33d& cameraMatrix,
+        cv::Vec4d& distCoeffs,
+        vector<cv::Matx31d>& rvecs,
+        vector<cv::Matx31d>& tvecs,
         vector<float>& reprojErrs,
         double& totalAvgErr) {
-    cameraMatrix = Mat::eye(3, 3, CV_64F);
-    if (flags & CALIB_FIX_ASPECT_RATIO)
-        cameraMatrix.at<double>(0, 0) = aspectRatio;
 
-    distCoeffs = Mat::zeros(8, 1, CV_64F);
+    cameraMatrix = Matx33d::eye();
+
+    if (flags & CALIB_FIX_ASPECT_RATIO)
+        cameraMatrix(0, 0) = aspectRatio;
+
+    distCoeffs = Vec4d::all(0);
 
     vector<vector<Point3f> > objectPoints(1);
     calcChessboardCorners(boardSize, squareSize, objectPoints[0], patternType);
 
     objectPoints.resize(imagePoints.size(), objectPoints[0]);
 
-    double rms = calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix,
-            distCoeffs, rvecs, tvecs, flags | CALIB_FIX_K4 | CALIB_FIX_K5);
+    double rms = fisheye::calibrate(objectPoints, imagePoints, imageSize, cameraMatrix,
+            distCoeffs, rvecs, tvecs, flags | fisheye::CALIB_USE_INTRINSIC_GUESS);
+
+    //    double rms = calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix,
+    //            distCoeffs, rvecs, tvecs, flags | CALIB_FIX_K4 | CALIB_FIX_K5);
     ///*|CALIB_FIX_K3*/|CALIB_FIX_K4|CALIB_FIX_K5);
     printf("RMS error reported by calibrateCamera: %g\n", rms);
 
@@ -199,9 +210,13 @@ static bool runCalibration(vector<vector<Point2f> > imagePoints,
 
 static void saveCameraParams(const string& filename,
         Size imageSize, Size boardSize,
-        float squareSize, float aspectRatio, int flags,
-        const Mat& cameraMatrix, const Mat& distCoeffs,
-        const vector<Mat>& rvecs, const vector<Mat>& tvecs,
+        float squareSize, 
+        float aspectRatio, 
+        int flags,
+        const cv::Matx33d& cameraMatrix, 
+        const cv::Vec4d& distCoeffs,
+        const vector<cv::Matx31d>& rvecs,
+        const vector<cv::Matx31d>& tvecs,
         const vector<float>& reprojErrs,
         const vector<vector<Point2f> >& imagePoints,
         double totalAvgErr) {
@@ -237,7 +252,7 @@ static void saveCameraParams(const string& filename,
 
     fs << "flags" << flags;
 
-    fs << "camera_matrix" << cameraMatrix;
+    fs << "camera_matrix" << (cv::Mat)cameraMatrix;
     fs << "distortion_coefficients" << distCoeffs;
 
     fs << "avg_reprojection_error" << totalAvgErr;
@@ -245,17 +260,19 @@ static void saveCameraParams(const string& filename,
         fs << "per_view_reprojection_errors" << Mat(reprojErrs);
 
     if (!rvecs.empty() && !tvecs.empty()) {
-        CV_Assert(rvecs[0].type() == tvecs[0].type());
-        Mat bigmat((int) rvecs.size(), 6, rvecs[0].type());
+        CV_Assert(rvecs[0].type == tvecs[0].type);
+        Mat bigmat((int) rvecs.size(), 6, rvecs[0].type);
         for (int i = 0; i < (int) rvecs.size(); i++) {
-            Mat r = bigmat(Range(i, i + 1), Range(0, 3));
-            Mat t = bigmat(Range(i, i + 1), Range(3, 6));
+            
+            cv::Mat r = bigmat(Range(i, i + 1), Range(0, 3));
+            cv::Mat t = bigmat(Range(i, i + 1), Range(3, 6));
 
             CV_Assert(rvecs[i].rows == 3 && rvecs[i].cols == 1);
             CV_Assert(tvecs[i].rows == 3 && tvecs[i].cols == 1);
             //*.t() is MatExpr (not Mat) so we can use assignment operator
-            r = rvecs[i].t();
-            t = tvecs[i].t();
+            
+            r = (cv::Mat)rvecs[i].t();
+            t = (cv::Mat)tvecs[i].t();
         }
         //cvWriteComment( *fs, "a set of 6-tuples (rotation vector + translation vector) for each view", 0 );
         fs << "extrinsic_parameters" << bigmat;
@@ -288,16 +305,26 @@ static bool readStringList(const string& filename, vector<string>& l) {
 
 static bool runAndSave(const string& outputFilename,
         const vector<vector<Point2f> >& imagePoints,
-        Size imageSize, Size boardSize, Pattern patternType, float squareSize,
-        float aspectRatio, int flags, Mat& cameraMatrix,
-        Mat& distCoeffs, bool writeExtrinsics, bool writePoints) {
-    vector<Mat> rvecs, tvecs;
+        Size imageSize, 
+        Size boardSize, 
+        Pattern patternType, 
+        float squareSize,
+        float aspectRatio, 
+        int flags, 
+        cv::Matx33d& cameraMatrix,
+        cv::Vec4d& distCoeffs, 
+        bool writeExtrinsics, 
+        bool writePoints) {
+
+
+    vector<cv::Matx31d> rvecs, tvecs;
     vector<float> reprojErrs;
     double totalAvgErr = 0;
 
     bool ok = runCalibration(imagePoints, imageSize, boardSize, patternType, squareSize,
             aspectRatio, flags, cameraMatrix, distCoeffs,
             rvecs, tvecs, reprojErrs, totalAvgErr);
+    
     printf("%s. avg reprojection error = %.2f\n",
             ok ? "Calibration succeeded" : "Calibration failed",
             totalAvgErr);
@@ -306,8 +333,8 @@ static bool runAndSave(const string& outputFilename,
         saveCameraParams(outputFilename, imageSize,
             boardSize, squareSize, aspectRatio,
             flags, cameraMatrix, distCoeffs,
-            writeExtrinsics ? rvecs : vector<Mat>(),
-            writeExtrinsics ? tvecs : vector<Mat>(),
+            writeExtrinsics ? rvecs : std::vector<cv::Matx31d>(),
+            writeExtrinsics ? tvecs : std::vector<cv::Matx31d>(),
             writeExtrinsics ? reprojErrs : vector<float>(),
             writePoints ? imagePoints : vector<vector<Point2f> >(),
             totalAvgErr);
@@ -317,7 +344,8 @@ static bool runAndSave(const string& outputFilename,
 int main(int argc, char** argv) {
     Size boardSize, imageSize;
     float squareSize = 1.f, aspectRatio = 1.f;
-    Mat cameraMatrix, distCoeffs;
+    cv::Matx33d cameraMatrix;
+    cv::Vec4d distCoeffs;
     const char* outputFilename = "out_camera_data.yml";
     const char* inputFilename = 0;
     std::string dummy_sink = "dummy_sink";
@@ -325,18 +353,17 @@ int main(int argc, char** argv) {
     int i, nframes = 10;
     bool writeExtrinsics = false, writePoints = false;
     bool undistortImage = false;
-    int flags = 0; 
-    
+    int flags = 0;
+
     bool use_simple_tracker_camera = false;
     Camera* camera; // TODO: add new flag to determine if this is used and what type it is
     std::string config_file;
     std::string config_key;
     bool config_used = false;
-    
-    
+
+
     bool flipVertical = false;
     bool showUndistorted = false;
-    //bool videofile = false;
     int delay = 1000;
     clock_t prevTimestamp = 0;
     int mode = DETECTION;
@@ -426,27 +453,27 @@ int main(int argc, char** argv) {
     switch (camera_type) {
         case LIST:
             readStringList(inputFilename, imageList);
-            nframes = (int)imageList.size();
+            nframes = (int) imageList.size();
             mode = CAPTURING;
             break;
-        
+
         case WCAM:
             use_simple_tracker_camera = true;
             camera = new WebCam(dummy_sink);
             break;
-            
+
         case GIGE:
             use_simple_tracker_camera = true;
             camera = new PGGigECam(dummy_sink);
             break;
-            
+
         case VIDFILE:
             use_simple_tracker_camera = true;
             camera = new FileReader(inputFilename, dummy_sink);
             break;
-            
+
         default:
-             return fprintf( stderr, "Unknown camera type \n"), -2;
+            return fprintf(stderr, "Unknown camera type \n"), -2;
     }
 
     if (config_used && config_file.empty() || config_used && config_key.empty()) {
@@ -458,34 +485,30 @@ int main(int argc, char** argv) {
         camera->configure(config_file, config_key);
     else if (use_simple_tracker_camera)
         camera->configure();
-    
-    if( use_simple_tracker_camera )
-        printf( "%s", liveCaptureHelp );
 
-    namedWindow( "Image View", 1 );
+    if (use_simple_tracker_camera)
+        printf("%s", liveCaptureHelp);
 
-    for(i = 0;;i++)
-    {
+    namedWindow("Image View", 1);
+
+    for (i = 0;; i++) {
         Mat view, viewGray;
         bool blink = false;
 
-        if( use_simple_tracker_camera )
-        {
+        if (use_simple_tracker_camera) {
             Mat view0;
             camera->grabMat();
             view0 = camera->getCurrentFrame();
             view0.copyTo(view);
-        }
-        else if( i < (int)imageList.size() )
+        } else if (i < (int) imageList.size())
             view = imread(imageList[i], 1);
 
-        if(view.empty())
-        {
-            if( imagePoints.size() > 0 )
+        if (view.empty()) {
+            if (imagePoints.size() > 0)
                 runAndSave(outputFilename, imagePoints, imageSize,
-                           boardSize, pattern, squareSize, aspectRatio,
-                           flags, cameraMatrix, distCoeffs,
-                           writeExtrinsics, writePoints);
+                    boardSize, pattern, squareSize, aspectRatio,
+                    flags, cameraMatrix, distCoeffs,
+                    writeExtrinsics, writePoints);
             break;
         }
 
@@ -580,7 +603,7 @@ int main(int argc, char** argv) {
 
     if (!use_simple_tracker_camera && showUndistorted) {
         Mat view, rview, map1, map2;
-        initUndistortRectifyMap(cameraMatrix, distCoeffs, Mat(),
+        fisheye::initUndistortRectifyMap(cameraMatrix, distCoeffs, Mat(),
                 getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, imageSize, 1, imageSize, 0),
                 imageSize, CV_16SC2, map1, map2);
 
